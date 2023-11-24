@@ -1,11 +1,9 @@
 .{
-  .name = "zuckdb",
-  .paths = .{""},
-  .version = "0.0.0",
-  .dependencies = .{
-    .typed = .{
-      .url = "https://github.com/karlseguin/typed.zig/archive/5e618d6697c813e9ed42f7ec12a1293d0255abb0.tar.gz",
-      .hash = "1220626468d9b98b41ced8c78b7b869599e970603ee30f272dad37d2e22e983254db"
-    }
-  },
+    .name = "zuckdb",
+    .paths = .{""},
+    .version = "0.0.0",
+    .dependencies = .{ .typed = .{
+        .url = "https://github.com/karlseguin/typed.zig/archive/master.tar.gz",
+        .hash = "12205c1d2ee3ce902ab4a67c49acf1a035dd8ef61a2f5735ad89410d0a412fc99826",
+    } },
 }

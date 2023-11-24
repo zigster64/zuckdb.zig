@@ -19,478 +19,480 @@ const STATEMENT_SIZEOF = c.statement_sizeof;
 const STATEMENT_ALIGNOF = c.statement_alignof;
 
 pub const Conn = struct {
-	version: u32 = 0,
-	allocator: Allocator,
-	conn: *c.duckdb_connection,
-	stmt_cache: std.StringHashMap(*c.duckdb_prepared_statement),
+    version: u32 = 0,
+    allocator: Allocator,
+    conn: *c.duckdb_connection,
+    stmt_cache: std.StringHashMap(*c.duckdb_prepared_statement),
 
-	pub fn open(db: DB) !Conn {
-		const allocator = db.allocator;
+    pub fn open(db: DB) !Conn {
+        const allocator = db.allocator;
 
-		var slice = try allocator.alignedAlloc(u8, CONN_ALIGNOF, CONN_SIZEOF);
-		errdefer allocator.free(slice);
-		const conn: *c.duckdb_connection = @ptrCast(slice.ptr);
+        const slice = try allocator.alignedAlloc(u8, CONN_ALIGNOF, CONN_SIZEOF);
+        errdefer allocator.free(slice);
+        const conn: *c.duckdb_connection = @ptrCast(slice.ptr);
 
-		if (c.duckdb_connect(db.db.*, conn) == DuckDBError) {
-			return error.ConnectFail;
-		}
+        if (c.duckdb_connect(db.db.*, conn) == DuckDBError) {
+            return error.ConnectFail;
+        }
 
-		return .{
-			.conn = conn,
-			.allocator = allocator,
-			.stmt_cache = std.StringHashMap(*c.duckdb_prepared_statement).init(allocator),
-		};
-	}
+        return .{
+            .conn = conn,
+            .allocator = allocator,
+            .stmt_cache = std.StringHashMap(*c.duckdb_prepared_statement).init(allocator),
+        };
+    }
 
-	pub fn deinit(self: Conn) void {
-		const conn = self.conn;
-		const allocator = self.allocator;
+    pub fn deinit(self: Conn) void {
+        const conn = self.conn;
+        const allocator = self.allocator;
 
-		self.clearStatementCache();
-		var stmt_cache = self.stmt_cache;
-		stmt_cache.deinit();
+        self.clearStatementCache();
+        var stmt_cache = self.stmt_cache;
+        stmt_cache.deinit();
 
-		c.duckdb_disconnect(conn);
+        c.duckdb_disconnect(conn);
 
-		const ptr: [*]align(CONN_ALIGNOF) u8 = @ptrCast(conn);
-		const slice = ptr[0..CONN_SIZEOF];
-		allocator.free(slice);
-	}
+        const ptr: [*]align(CONN_ALIGNOF) u8 = @ptrCast(conn);
+        const slice = ptr[0..CONN_SIZEOF];
+        allocator.free(slice);
+    }
 
-	pub fn begin(self: Conn) !void {
-		return self.execZ("begin transaction");
-	}
+    pub fn begin(self: Conn) !void {
+        return self.execZ("begin transaction");
+    }
 
-	pub fn commit(self: Conn) !void {
-		return self.execZ("commit");
-	}
+    pub fn commit(self: Conn) !void {
+        return self.execZ("commit");
+    }
 
-	pub fn rollback(self: Conn) !void {
-		return self.execZ("rollback");
-	}
+    pub fn rollback(self: Conn) !void {
+        return self.execZ("rollback");
+    }
 
-	pub fn exec(self: Conn, sql: []const u8) !void {
-		const zql = try self.allocator.dupeZ(u8, sql);
-		defer self.allocator.free(zql);
-		return self.execZ(zql);
-	}
+    pub fn exec(self: Conn, sql: []const u8) !void {
+        const zql = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(zql);
+        return self.execZ(zql);
+    }
 
-	pub fn execZ(self: Conn, sql: [:0]const u8) !void {
-		if (c.duckdb_query(self.conn.*, sql, null) == DuckDBError) {
-			return error.ExecFailed;
-		}
-	}
+    pub fn execZ(self: Conn, sql: [:0]const u8) !void {
+        if (c.duckdb_query(self.conn.*, sql, null) == DuckDBError) {
+            return error.ExecFailed;
+        }
+    }
 
-	pub fn query(self: Conn, sql: []const u8, values: anytype) Result(Rows) {
-		return self.queryWithState(sql, values, null);
-	}
+    pub fn query(self: Conn, sql: []const u8, values: anytype) Result(Rows) {
+        return self.queryWithState(sql, values, null);
+    }
 
-	pub fn queryZ(self: Conn, sql: [:0]const u8, values: anytype) Result(Rows) {
-		return self.queryZWithState(sql, values, null);
-	}
+    pub fn queryZ(self: Conn, sql: [:0]const u8, values: anytype) Result(Rows) {
+        return self.queryZWithState(sql, values, null);
+    }
 
-	pub fn queryWithState(self: Conn, sql: []const u8, values: anytype, state: anytype) Result(Rows) {
-		const zql = self.allocator.dupeZ(u8, sql) catch |err| {
-			return Result(Rows).allocErr(err, .{});
-		};
-		defer self.allocator.free(zql);
-		return self.queryZWithState(zql, values, state);
-	}
+    pub fn queryWithState(self: Conn, sql: []const u8, values: anytype, state: anytype) Result(Rows) {
+        const zql = self.allocator.dupeZ(u8, sql) catch |err| {
+            return Result(Rows).allocErr(err, .{});
+        };
+        defer self.allocator.free(zql);
+        return self.queryZWithState(zql, values, state);
+    }
 
-	pub fn queryZWithState(self: Conn, sql: [:0]const u8, values: anytype, state: anytype) Result(Rows) {
-		if (values.len == 0) {
-				const allocator = self.allocator;
-				var slice = allocator.alignedAlloc(u8, RESULT_ALIGNOF, RESULT_SIZEOF) catch |err| {
-				return Result(Rows).allocErr(err, .{});
-			};
-			const result: *c.duckdb_result = @ptrCast(slice.ptr);
-			if (c.duckdb_query(self.conn.*, sql, result) == DuckDBError) {
-				return Result(Rows).resultErr(allocator, null, result);
-			}
-			return Rows.init(allocator, null, result, state);
-		}
+    pub fn queryZWithState(self: Conn, sql: [:0]const u8, values: anytype, state: anytype) Result(Rows) {
+        if (values.len == 0) {
+            const allocator = self.allocator;
+            const slice = allocator.alignedAlloc(u8, RESULT_ALIGNOF, RESULT_SIZEOF) catch |err| {
+                return Result(Rows).allocErr(err, .{});
+            };
+            const result: *c.duckdb_result = @ptrCast(slice.ptr);
+            if (c.duckdb_query(self.conn.*, sql, result) == DuckDBError) {
+                return Result(Rows).resultErr(allocator, null, result);
+            }
+            return Rows.init(allocator, null, result, state);
+        }
 
-		const prepare_result = self.prepareZ(sql);
-		const stmt = switch (prepare_result) {
-			.ok => |stmt| stmt,
-			.err => |err| return .{.err = err},
-		};
+        const prepare_result = self.prepareZ(sql);
+        const stmt = switch (prepare_result) {
+            .ok => |stmt| stmt,
+            .err => |err| return .{ .err = err },
+        };
 
-		stmt.bind(values) catch |err| {
-			return .{.err = .{
-				.err = err,
-				.stmt = stmt,
-				.desc = "bind error",
-				.allocator = self.allocator,
-			}};
-		};
-		return stmt.executeOwned(state, true);
-	}
+        stmt.bind(values) catch |err| {
+            return .{ .err = .{
+                .err = err,
+                .stmt = stmt,
+                .desc = "bind error",
+                .allocator = self.allocator,
+            } };
+        };
+        return stmt.executeOwned(state, true);
+    }
 
-	pub fn row(self: Conn, sql: []const u8, values: anytype) Result(?OwningRow) {
-		return self.rowWithState(sql, values, null);
-	}
+    pub fn row(self: Conn, sql: []const u8, values: anytype) Result(?OwningRow) {
+        return self.rowWithState(sql, values, null);
+    }
 
-	pub fn rowZ(self: Conn, sql: [:0]const u8, values: anytype) Result(?OwningRow) {
-		return self.rowZWithState(sql, values, null);
-	}
+    pub fn rowZ(self: Conn, sql: [:0]const u8, values: anytype) Result(?OwningRow) {
+        return self.rowZWithState(sql, values, null);
+    }
 
-	pub fn rowWithState(self: Conn, sql: []const u8, values: anytype, state: anytype) Result(?OwningRow) {
-		const zql = self.allocator.dupeZ(u8, sql) catch |err| {
-			return Result(?OwningRow).allocErr(err, .{});
-		};
-		defer self.allocator.free(zql);
-		return self.rowZWithState(zql, values, state);
-	}
+    pub fn rowWithState(self: Conn, sql: []const u8, values: anytype, state: anytype) Result(?OwningRow) {
+        const zql = self.allocator.dupeZ(u8, sql) catch |err| {
+            return Result(?OwningRow).allocErr(err, .{});
+        };
+        defer self.allocator.free(zql);
+        return self.rowZWithState(zql, values, state);
+    }
 
-	pub fn rowZWithState(self: Conn, sql: [:0]const u8, values: anytype, state: anytype) Result(?OwningRow) {
-		const query_result = self.queryZWithState(sql, values, state);
-		var rows = switch (query_result) {
-			.ok => |rows| rows,
-			.err => |err| return .{.err = err},
-		};
+    pub fn rowZWithState(self: Conn, sql: [:0]const u8, values: anytype, state: anytype) Result(?OwningRow) {
+        const query_result = self.queryZWithState(sql, values, state);
+        var rows = switch (query_result) {
+            .ok => |rows| rows,
+            .err => |err| return .{ .err = err },
+        };
 
-		const r = rows.next() catch |err| {
-			query_result.deinit();
-			return Result(?OwningRow).staticErr(err, "Failed to fetch row", .{});
-		} orelse {
-			query_result.deinit();
-			return .{.ok = null};
-		};
+        const r = rows.next() catch |err| {
+            query_result.deinit();
+            return Result(?OwningRow).staticErr(err, "Failed to fetch row", .{});
+        } orelse {
+            query_result.deinit();
+            return .{ .ok = null };
+        };
 
-		return .{.ok = .{.row = r, .rows = rows}};
-	}
+        return .{ .ok = .{ .row = r, .rows = rows } };
+    }
 
-	pub fn prepare(self: *const Conn, sql: []const u8) Result(Stmt) {
-		const zql = self.allocator.dupeZ(u8, sql) catch |err| {
-			return Result(Stmt).allocErr(err, .{});
-		};
-		defer self.allocator.free(zql);
-		return self.prepareZ(zql);
-	}
+    pub fn prepare(self: *const Conn, sql: []const u8) Result(Stmt) {
+        const zql = self.allocator.dupeZ(u8, sql) catch |err| {
+            return Result(Stmt).allocErr(err, .{});
+        };
+        defer self.allocator.free(zql);
+        return self.prepareZ(zql);
+    }
 
-	pub fn prepareZ(self: *const Conn, sql: [:0]const u8) Result(Stmt) {
-		const allocator = self.allocator;
-		var slice = allocator.alignedAlloc(u8, STATEMENT_ALIGNOF, STATEMENT_SIZEOF) catch |err| {
-			return Result(Stmt).allocErr(err, .{});
-		};
+    pub fn prepareZ(self: *const Conn, sql: [:0]const u8) Result(Stmt) {
+        const allocator = self.allocator;
+        const slice = allocator.alignedAlloc(u8, STATEMENT_ALIGNOF, STATEMENT_SIZEOF) catch |err| {
+            return Result(Stmt).allocErr(err, .{});
+        };
 
-		const stmt: *c.duckdb_prepared_statement = @ptrCast(slice.ptr);
-		if (c.duckdb_prepare(self.conn.*, sql, stmt) == DuckDBError) {
-			return .{.err = .{
-				.err = error.Prepare,
-				.stmt = Stmt.init(allocator, stmt, false),
-				.desc = std.mem.span(c.duckdb_prepare_error(stmt.*)),
-				.allocator = allocator,
-			}};
-		}
+        const stmt: *c.duckdb_prepared_statement = @ptrCast(slice.ptr);
+        if (c.duckdb_prepare(self.conn.*, sql, stmt) == DuckDBError) {
+            return .{ .err = .{
+                .err = error.Prepare,
+                .stmt = Stmt.init(allocator, stmt, false),
+                .desc = std.mem.span(c.duckdb_prepare_error(stmt.*)),
+                .allocator = allocator,
+            } };
+        }
 
-		return .{.ok = Stmt.init(allocator, stmt, false)};
-	}
+        return .{ .ok = Stmt.init(allocator, stmt, false) };
+    }
 
-	pub fn queryCache(self: *Conn, name: []const u8, sql: []const u8, values: anytype) Result(Rows) {
-		return self.queryCacheWithState(name, sql, values, null);
-	}
+    pub fn queryCache(self: *Conn, name: []const u8, sql: []const u8, values: anytype) Result(Rows) {
+        return self.queryCacheWithState(name, sql, values, null);
+    }
 
-	pub fn queryCacheZ(self: *Conn, name: []const u8, sql: [:0]const u8, values: anytype) Result(Rows) {
-		return self.queryCacheZWithState(name, sql, values, null);
-	}
+    pub fn queryCacheZ(self: *Conn, name: []const u8, sql: [:0]const u8, values: anytype) Result(Rows) {
+        return self.queryCacheZWithState(name, sql, values, null);
+    }
 
-	pub fn queryCacheWithState(self: *Conn, name: []const u8, sql: []const u8, values: anytype, state: anytype) Result(Rows) {
-		const zql = self.allocator.dupeZ(u8, sql) catch |err| {
-			return Result(Rows).allocErr(err, .{});
-		};
-		defer self.allocator.free(zql);
-		return self.queryCacheZWithState(name, zql, values, state);
-	}
+    pub fn queryCacheWithState(self: *Conn, name: []const u8, sql: []const u8, values: anytype, state: anytype) Result(Rows) {
+        const zql = self.allocator.dupeZ(u8, sql) catch |err| {
+            return Result(Rows).allocErr(err, .{});
+        };
+        defer self.allocator.free(zql);
+        return self.queryCacheZWithState(name, zql, values, state);
+    }
 
-	pub fn queryCacheZWithState(self: *Conn, name: []const u8, sql: [:0]const u8, values: anytype, state: anytype) Result(Rows) {
-		const prepare_result = self.prepareCacheZ(name, sql);
-		const stmt = switch (prepare_result) {
-			.ok => |stmt| stmt,
-			.err => |err| return .{.err = err},
-		};
+    pub fn queryCacheZWithState(self: *Conn, name: []const u8, sql: [:0]const u8, values: anytype, state: anytype) Result(Rows) {
+        const prepare_result = self.prepareCacheZ(name, sql);
+        const stmt = switch (prepare_result) {
+            .ok => |stmt| stmt,
+            .err => |err| return .{ .err = err },
+        };
 
-		stmt.bind(values) catch |err| {
-			return .{.err = .{
-				.err = err,
-				.stmt = null, // don't want to free this, as its meant to be cached
-				.desc = "bind error",
-				.allocator = self.allocator,
-			}};
-		};
+        stmt.bind(values) catch |err| {
+            return .{
+                .err = .{
+                    .err = err,
+                    .stmt = null, // don't want to free this, as its meant to be cached
+                    .desc = "bind error",
+                    .allocator = self.allocator,
+                },
+            };
+        };
 
-		return stmt.executeOwned(state, true);
-	}
+        return stmt.executeOwned(state, true);
+    }
 
-	pub fn prepareCache(self: *Conn, name: []const u8, sql: []const u8) Result(Stmt) {
-		const zql = self.allocator.dupeZ(u8, sql) catch |err| {
-			return Result(Stmt).allocErr(err, .{});
-		};
-		defer self.allocator.free(zql);
-		return self.prepareCacheZ(name, zql);
-	}
+    pub fn prepareCache(self: *Conn, name: []const u8, sql: []const u8) Result(Stmt) {
+        const zql = self.allocator.dupeZ(u8, sql) catch |err| {
+            return Result(Stmt).allocErr(err, .{});
+        };
+        defer self.allocator.free(zql);
+        return self.prepareCacheZ(name, zql);
+    }
 
-	pub fn prepareCacheZ(self: *Conn, name: []const u8, sql: [:0]const u8) Result(Stmt) {
-		const allocator = self.allocator;
+    pub fn prepareCacheZ(self: *Conn, name: []const u8, sql: [:0]const u8) Result(Stmt) {
+        const allocator = self.allocator;
 
-		if (self.stmt_cache.get(name)) |stmt| {
-			return .{.ok = Stmt.init(allocator, stmt, true)};
-		}
-		const prepare_result = self.prepareZ(sql);
-		var stmt = switch (prepare_result) {
-			.ok => |s| s,
-			.err => |err| return .{.err = err},
-		};
+        if (self.stmt_cache.get(name)) |stmt| {
+            return .{ .ok = Stmt.init(allocator, stmt, true) };
+        }
+        const prepare_result = self.prepareZ(sql);
+        var stmt = switch (prepare_result) {
+            .ok => |s| s,
+            .err => |err| return .{ .err = err },
+        };
 
-		const owned_name = allocator.dupe(u8, name) catch |err| {
-			return Result(Stmt).allocErr(err, .{.stmt = stmt});
-		};
+        const owned_name = allocator.dupe(u8, name) catch |err| {
+            return Result(Stmt).allocErr(err, .{ .stmt = stmt });
+        };
 
-		self.stmt_cache.put(owned_name, stmt.stmt) catch |err| {
-			return Result(Stmt).allocErr(err, .{.stmt = stmt});
-		};
+        self.stmt_cache.put(owned_name, stmt.stmt) catch |err| {
+            return Result(Stmt).allocErr(err, .{ .stmt = stmt });
+        };
 
-		stmt.cached = true;
-		return .{.ok = stmt};
-	}
+        stmt.cached = true;
+        return .{ .ok = stmt };
+    }
 
-	pub fn clearStatementCache(self: Conn) void {
-		const allocator = self.allocator;
-		var stmt_cache = self.stmt_cache;
+    pub fn clearStatementCache(self: Conn) void {
+        const allocator = self.allocator;
+        var stmt_cache = self.stmt_cache;
 
-		var it = stmt_cache.iterator();
-		while (it.next()) |entry| {
-			allocator.free(entry.key_ptr.*);
-			const stmt = entry.value_ptr.*;
-			c.duckdb_destroy_prepare(stmt);
+        var it = stmt_cache.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            const stmt = entry.value_ptr.*;
+            c.duckdb_destroy_prepare(stmt);
 
-			const ptr: [*]align(STATEMENT_ALIGNOF) u8 = @ptrCast(stmt);
-			const slice = ptr[0..STATEMENT_SIZEOF];
-			self.allocator.free(slice);
-		}
-		stmt_cache.clearRetainingCapacity();
-	}
+            const ptr: [*]align(STATEMENT_ALIGNOF) u8 = @ptrCast(stmt);
+            const slice = ptr[0..STATEMENT_SIZEOF];
+            self.allocator.free(slice);
+        }
+        stmt_cache.clearRetainingCapacity();
+    }
 };
 
 const t = std.testing;
 test "exec error" {
-	const db = DB.init(t.allocator, ":memory:", .{}).ok;
-	defer db.deinit();
+    const db = DB.init(t.allocator, ":memory:", .{}).ok;
+    defer db.deinit();
 
-	const conn = try db.conn();
-	defer conn.deinit();
+    const conn = try db.conn();
+    defer conn.deinit();
 
-	try t.expectError(error.ExecFailed, conn.exec("select from x"));
+    try t.expectError(error.ExecFailed, conn.exec("select from x"));
 }
 
 test "exec success" {
-	const db = DB.init(t.allocator, ":memory:", .{}).ok;
-	defer db.deinit();
+    const db = DB.init(t.allocator, ":memory:", .{}).ok;
+    defer db.deinit();
 
-	const conn = try db.conn();
-	defer conn.deinit();
+    const conn = try db.conn();
+    defer conn.deinit();
 
-	try conn.exec("create table t (id int)");
-	try conn.exec("insert into t (id) values (39)");
+    try conn.exec("create table t (id int)");
+    try conn.exec("insert into t (id) values (39)");
 
-	var rows = conn.queryZ("select * from t", .{}).ok;
-	defer rows.deinit();
-	try t.expectEqual(@as(i64, 39), (try rows.next()).?.get(i32, 0).?);
+    var rows = conn.queryZ("select * from t", .{}).ok;
+    defer rows.deinit();
+    try t.expectEqual(@as(i64, 39), (try rows.next()).?.get(i32, 0).?);
 }
 
 test "query error" {
-	const db = DB.init(t.allocator, ":memory:", .{}).ok;
-	defer db.deinit();
+    const db = DB.init(t.allocator, ":memory:", .{}).ok;
+    defer db.deinit();
 
-	const conn = try db.conn();
-	defer conn.deinit();
+    const conn = try db.conn();
+    defer conn.deinit();
 
-	const err = conn.queryZ("select from x", .{}).err;
-	defer err.deinit();
-	try t.expectEqualStrings("Parser Error: SELECT clause without selection list", err.desc);
+    const err = conn.queryZ("select from x", .{}).err;
+    defer err.deinit();
+    try t.expectEqualStrings("Parser Error: SELECT clause without selection list", err.desc);
 }
 
 test "query select ok" {
-	const db = DB.init(t.allocator, ":memory:", .{}).ok;
-	defer db.deinit();
+    const db = DB.init(t.allocator, ":memory:", .{}).ok;
+    defer db.deinit();
 
-	const conn = try db.conn();
-	defer conn.deinit();
+    const conn = try db.conn();
+    defer conn.deinit();
 
-	var res = conn.queryZ("select 39213", .{});
-	defer res.deinit();
-	var rows = switch (res) {
-		.err => unreachable,
-		.ok => |rows| rows,
-	};
+    var res = conn.queryZ("select 39213", .{});
+    defer res.deinit();
+    var rows = switch (res) {
+        .err => unreachable,
+        .ok => |rows| rows,
+    };
 
-	const row = (try rows.next()).?;
-	try t.expectEqual(@as(i32, 39213), row.get(i32, 0).?);
-	try t.expectEqual(@as(?Row, null), try rows.next());
+    const row = (try rows.next()).?;
+    try t.expectEqual(@as(i32, 39213), row.get(i32, 0).?);
+    try t.expectEqual(@as(?Row, null), try rows.next());
 }
 
 test "query empty" {
-	const db = DB.init(t.allocator, ":memory:", .{}).ok;
-	defer db.deinit();
+    const db = DB.init(t.allocator, ":memory:", .{}).ok;
+    defer db.deinit();
 
-	const conn = try db.conn();
-	defer conn.deinit();
+    const conn = try db.conn();
+    defer conn.deinit();
 
-	var res = conn.queryZ("select 1 where false", .{});
-	defer res.deinit();
-	var rows = switch (res) {
-		.err => unreachable,
-		.ok => |rows| rows,
-	};
-	try t.expectEqual(@as(?Row, null), try rows.next());
+    var res = conn.queryZ("select 1 where false", .{});
+    defer res.deinit();
+    var rows = switch (res) {
+        .err => unreachable,
+        .ok => |rows| rows,
+    };
+    try t.expectEqual(@as(?Row, null), try rows.next());
 }
 
 test "query mutate ok" {
-	const db = DB.init(t.allocator, ":memory:", .{}).ok;
-	defer db.deinit();
+    const db = DB.init(t.allocator, ":memory:", .{}).ok;
+    defer db.deinit();
 
-	const conn = try db.conn();
-	defer conn.deinit();
+    const conn = try db.conn();
+    defer conn.deinit();
 
-	{
-		const rows = conn.query("create table test(id integer);", .{}).ok;
-		defer rows.deinit();
-		try t.expectEqual(@as(usize, 0), rows.count());
-		try t.expectEqual(@as(usize, 0), rows.changed());
-	}
+    {
+        const rows = conn.query("create table test(id integer);", .{}).ok;
+        defer rows.deinit();
+        try t.expectEqual(@as(usize, 0), rows.count());
+        try t.expectEqual(@as(usize, 0), rows.changed());
+    }
 
-	{
-		const rows = conn.queryZ("insert into test (id) values (9001);", .{}).ok;
-		defer rows.deinit();
+    {
+        const rows = conn.queryZ("insert into test (id) values (9001);", .{}).ok;
+        defer rows.deinit();
 
-		try t.expectEqual(@as(usize, 1), rows.count());
-		try t.expectEqual(@as(usize, 1), rows.changed());
-	}
+        try t.expectEqual(@as(usize, 1), rows.count());
+        try t.expectEqual(@as(usize, 1), rows.changed());
+    }
 }
 
 test "transaction" {
-	const db = DB.init(t.allocator, ":memory:", .{}).ok;
-	defer db.deinit();
+    const db = DB.init(t.allocator, ":memory:", .{}).ok;
+    defer db.deinit();
 
-	const conn = try db.conn();
-	defer conn.deinit();
+    const conn = try db.conn();
+    defer conn.deinit();
 
-	{
-		//rollback
-		try conn.execZ("create table t (id int)");
-		try conn.begin();
-		try conn.execZ("insert into t (id) values (1)");
-		try conn.rollback();
+    {
+        //rollback
+        try conn.execZ("create table t (id int)");
+        try conn.begin();
+        try conn.execZ("insert into t (id) values (1)");
+        try conn.rollback();
 
-		var rows = conn.queryZ("select * from t", .{}).ok;
-		defer rows.deinit();
-		try t.expectEqual(@as(?Row, null), try rows.next());
-	}
+        var rows = conn.queryZ("select * from t", .{}).ok;
+        defer rows.deinit();
+        try t.expectEqual(@as(?Row, null), try rows.next());
+    }
 
-	{
-		// commit
-		try conn.begin();
-		try conn.execZ("insert into t (id) values (1)");
-		try conn.commit();
+    {
+        // commit
+        try conn.begin();
+        try conn.execZ("insert into t (id) values (1)");
+        try conn.commit();
 
-		var rows = conn.queryZ("select * from t", .{}).ok;
-		defer rows.deinit();
-		try t.expectEqual(@as(i32, 1), (try rows.next()).?.get(i32, 0).?);
-	}
+        var rows = conn.queryZ("select * from t", .{}).ok;
+        defer rows.deinit();
+        try t.expectEqual(@as(i32, 1), (try rows.next()).?.get(i32, 0).?);
+    }
 }
 
 test "queryCache" {
-	const db = DB.init(t.allocator, ":memory:", .{}).ok;
-	defer db.deinit();
+    const db = DB.init(t.allocator, ":memory:", .{}).ok;
+    defer db.deinit();
 
-	var conn = try db.conn();
-	defer conn.deinit();
+    var conn = try db.conn();
+    defer conn.deinit();
 
-	{
-		//initial query
-		var rows = conn.queryCache("q1", "select $1::int", .{334}).ok;
-		defer rows.deinit();
-		try t.expectEqual(@as(i32, 334), (try rows.next()).?.get(i32, 0).?);
-	}
+    {
+        //initial query
+        var rows = conn.queryCache("q1", "select $1::int", .{334}).ok;
+        defer rows.deinit();
+        try t.expectEqual(@as(i32, 334), (try rows.next()).?.get(i32, 0).?);
+    }
 
-	{
-		// from cache
-		var rows = conn.queryCache("q1", "", .{999}).ok;
-		defer rows.deinit();
-		try t.expectEqual(@as(i32, 999), (try rows.next()).?.get(i32, 0).?);
-	}
+    {
+        // from cache
+        var rows = conn.queryCache("q1", "", .{999}).ok;
+        defer rows.deinit();
+        try t.expectEqual(@as(i32, 999), (try rows.next()).?.get(i32, 0).?);
+    }
 
-	{
-		// separate query
-		var rows = conn.queryCache("q2", "select $1::varchar", .{"teg"}).ok;
-		defer rows.deinit();
-		try t.expectEqualStrings("teg", (try rows.next()).?.get([]u8, 0).?);
-	}
+    {
+        // separate query
+        var rows = conn.queryCache("q2", "select $1::varchar", .{"teg"}).ok;
+        defer rows.deinit();
+        try t.expectEqualStrings("teg", (try rows.next()).?.get([]u8, 0).?);
+    }
 
-	conn.clearStatementCache();
-	{
-		// q1 should not be loaded from the cache, since we cleared
-		var rows = conn.queryCache("q1", "select $1::int+1000", .{334}).ok;
-		defer rows.deinit();
-		try t.expectEqual(@as(i32, 1334), (try rows.next()).?.get(i32, 0).?);
-	}
+    conn.clearStatementCache();
+    {
+        // q1 should not be loaded from the cache, since we cleared
+        var rows = conn.queryCache("q1", "select $1::int+1000", .{334}).ok;
+        defer rows.deinit();
+        try t.expectEqual(@as(i32, 1334), (try rows.next()).?.get(i32, 0).?);
+    }
 }
 
 test "query with explicit state" {
-	const db = DB.init(t.allocator, ":memory:", .{}).ok;
-	defer db.deinit();
+    const db = DB.init(t.allocator, ":memory:", .{}).ok;
+    defer db.deinit();
 
-	var conn = try db.conn();
-	defer conn.deinit();
+    var conn = try db.conn();
+    defer conn.deinit();
 
-	var state = @import("zuckdb.zig").StaticState(2){};
-	var rows = conn.queryCacheWithState("q1", "select $1::int, $2::varchar", .{9392, "teg"}, &state).ok;
-	defer rows.deinit();
-	const row = (try rows.next()).?;
-	try t.expectEqual(@as(i32, 9392), row.get(i32, 0).?);
-	try t.expectEqualStrings("teg", row.get([]u8, 1).?);
+    var state = @import("zuckdb.zig").StaticState(2){};
+    var rows = conn.queryCacheWithState("q1", "select $1::int, $2::varchar", .{ 9392, "teg" }, &state).ok;
+    defer rows.deinit();
+    const row = (try rows.next()).?;
+    try t.expectEqual(@as(i32, 9392), row.get(i32, 0).?);
+    try t.expectEqualStrings("teg", row.get([]u8, 1).?);
 }
 
 test "constraint errors" {
-	const db = DB.init(t.allocator, ":memory:", .{}).ok;
-	defer db.deinit();
+    const db = DB.init(t.allocator, ":memory:", .{}).ok;
+    defer db.deinit();
 
-	const conn = try db.conn();
-	defer conn.deinit();
+    const conn = try db.conn();
+    defer conn.deinit();
 
-	try conn.execZ("create table t (name varchar not null)");
-	try conn.execZ("create unique index t_name on t (name)");
-	try conn.execZ("insert into t (name) values ('leto')");
+    try conn.execZ("create table t (name varchar not null)");
+    try conn.execZ("create unique index t_name on t (name)");
+    try conn.execZ("insert into t (name) values ('leto')");
 
-	{
-		// not a duplicate error
-		const err = conn.queryZ("create table t (name varchar not null)", .{}).err;
-		defer err.deinit();
-		try t.expectEqual(false, err.isDuplicate());
-	}
+    {
+        // not a duplicate error
+        const err = conn.queryZ("create table t (name varchar not null)", .{}).err;
+        defer err.deinit();
+        try t.expectEqual(false, err.isDuplicate());
+    }
 
-	{
-		const err = conn.query("insert into t (name) values ('leto')", .{}).err;
-		defer err.deinit();
-		try t.expectEqual(true, err.isDuplicate());
-	}
+    {
+        const err = conn.query("insert into t (name) values ('leto')", .{}).err;
+        defer err.deinit();
+        try t.expectEqual(true, err.isDuplicate());
+    }
 }
 
 test "prepare error" {
-	const db = DB.init(t.allocator, ":memory:", .{}).ok;
-	defer db.deinit();
+    const db = DB.init(t.allocator, ":memory:", .{}).ok;
+    defer db.deinit();
 
-	const conn = try db.conn();
-	defer conn.deinit();
+    const conn = try db.conn();
+    defer conn.deinit();
 
-	const stmt = conn.prepare("select x");
-	defer stmt.deinit();
+    const stmt = conn.prepare("select x");
+    defer stmt.deinit();
 
-	switch (stmt) {
-		.ok => unreachable,
-		.err => |err| {
-			try t.expectEqualStrings("Binder Error: Referenced column \"x\" not found in FROM clause!\nLINE 1: select x\n               ^", err.desc);
-		}
-	}
+    switch (stmt) {
+        .ok => unreachable,
+        .err => |err| {
+            try t.expectEqualStrings("Binder Error: Referenced column \"x\" not found in FROM clause!\nLINE 1: select x\n               ^", err.desc);
+        },
+    }
 }
